@@ -3,12 +3,9 @@ const cors = require("cors");
 const http = require("http");
 const WebSocket = require("ws");
 require("dotenv").config();
+const { getUserIdFromToken } = require("./middlewares/authMiddleware");
 
 const authRoutes = require("./routes/authRoutes");
-const chatRoutes = require("./routes/chatRoutes");
-const groupRoutes = require("./routes/groupRoutes");
-const conversationRoutes = require("./routes/conversationRoutes");
-const userRoutes = require("./routes/userRoutes");
 const db = require("./config/db");
 
 const app = express();
@@ -23,128 +20,225 @@ app.use(express.json());
 
 // Routes
 app.use("/app/auth", authRoutes);
-app.use("/app/users", userRoutes);
-app.use("/app/chat", chatRoutes);
-app.use("/api/group", groupRoutes);
-app.use("/api/conversations", conversationRoutes);
 
-// WebSocket Connections
-const clients = new Map();
-
-wss.on("connection", (ws) => {
-  ws.on("message", (message) => {
-    try {
-      const data = JSON.parse(message);
-
-      switch (data.type) {
-        case "chat_message":
-          updateChats(data);
-          break;
-        // case "join":
-        //   clients.set(data.userId, ws);
-        //   break;
-
-        // case "sendMessage":
-        //   handlePrivateMessage(data);
-        //   break;
-
-        // case "sendGroupMessage":
-        //   handleGroupMessage(data);
-        //   break;
-
-        default:
-          console.log("Unknown message type:", data);
+const client = new Map();
+//write function to get all chats and groups of a user using jwt
+const getChats = (userId) => {
+  const ws = client.get(userId);
+  if (!ws) return;
+  db.query(
+    `SELECT u.id ,u.full_name, u.username, u.email
+FROM connections c
+JOIN users u 
+ON ((c.user_1 =? AND u.id = c.user_2) 
+OR (c.user_2 = ? AND u.id = c.user_1))
+WHERE c.user_1 = ? OR c.user_2 = ?;`,
+    [userId, userId, userId, userId],
+    (err, result) => {
+      if (err) {
+        console.error(err);
+        return;
       }
-    } catch (error) {
-      console.error("WebSocket error:", error);
-    }
-  });
-
-  ws.on("close", () => {
-    for (const [userId, client] of clients.entries()) {
-      if (client === ws) {
-        clients.delete(userId);
-        break;
-      }
-    }
-  });
-});
-
-function updateChats(data) {
-  const { sent_by, sent_to, message } = data;
-  const query = `INSERT INTO chats (sent_by,sent_to, message) VALUES (?, ?, ?)`;
-  db.query(query, [sent_by, sent_to, message], (err, result) => {
-    if (err) return console.error(err);
-    console.log("Message inserted:", result);
-    const chatMessage = {
-      type: "receiveMessage",
-      // chatId: result.insertId,
-      sent_by,
-      sent_to,
-      message,
-      timestamp: new Date(),
-    };
-
-    // const socket = clients.get(receiverId);
-    // if (socket && socket.readyState === WebSocket.OPEN) {
-    //   socket.send(JSON.stringify(chatMessage));
-    // }
-  });
-}
-
-function handlePrivateMessage(data) {
-  const { senderId, receiverId, message } = data;
-
-  const query = `INSERT INTO chats (sender_id, receiver_id, message) VALUES (?, ?, ?)`;
-  db.query(query, [senderId, receiverId, message], (err, result) => {
-    if (err) return console.error(err);
-
-    const chatMessage = {
-      type: "receiveMessage",
-      chatId: result.insertId,
-      senderId,
-      receiverId,
-      message,
-      timestamp: new Date(),
-    };
-
-    [senderId, receiverId].forEach((userId) => {
-      const socket = clients.get(userId);
-      if (socket && socket.readyState === WebSocket.OPEN) {
-        socket.send(JSON.stringify(chatMessage));
-      }
-    });
-  });
-}
-
-function handleGroupMessage(data) {
-  const { senderId, groupId, message } = data;
-
-  const query = `INSERT INTO group_chats (group_id, sender_id, message) VALUES (?, ?, ?)`;
-  db.query(query, [groupId, senderId, message], (err, result) => {
-    if (err) return console.error(err);
-
-    const groupMessage = {
-      type: "receiveGroupMessage",
-      chatId: result.insertId,
-      senderId,
-      groupId,
-      message,
-      timestamp: new Date(),
-    };
-
-    const membersQuery = `SELECT user_id FROM group_members WHERE group_id = ?`;
-    db.query(membersQuery, [groupId], (err, members) => {
-      if (err) return console.error(err);
-
-      members.forEach(({ user_id }) => {
-        const socket = clients.get(user_id);
-        if (socket && socket.readyState === WebSocket.OPEN) {
-          socket.send(JSON.stringify(groupMessage));
-        }
+      const message = JSON.stringify({
+        type: "get_chats",
+        data: result,
       });
+      ws.send(message);
+    }
+  );
+};
+
+const getGroups = (userId) => {
+  const ws = client.get(userId);
+  if (!ws) return;
+  db.query(
+    `SELECT gl.id AS group_id, gl.group_name,gl.last_message
+FROM group_members gm
+JOIN groups_list gl ON gm.group_id = gl.id
+WHERE gm.user_id = ?;`,
+    [userId],
+    (err, result) => {
+      if (err) {
+        console.error(err);
+        return;
+      }
+      const message = JSON.stringify({
+        type: "get_groups",
+        data: result,
+      });
+      ws.send(message);
+    }
+  );
+};
+
+const getChat = (userId, receiverId) => {
+  const ws = client.get(userId);
+  if (!ws) return;
+  db.query(
+    `select *
+from chats
+where (sent_by=? AND sent_to=?) OR (sent_by=? AND sent_to=?)
+order by sent_time;`,
+    [userId, receiverId, receiverId, userId],
+    (err, result) => {
+      if (err) {
+        console.error(err);
+        return;
+      }
+      const message = JSON.stringify({
+        type: "get_chat_data",
+        data: result,
+        extra_data: { chatID: receiverId },
+      });
+      ws.send(message);
+    }
+  );
+};
+
+const sendMessage = (userId, receiverId, message) => {
+  const toWs = client.get(receiverId);
+  if (!toWs) return;
+  db.query(
+    `INSERT INTO chats (sent_by, sent_to, message) VALUES (?, ?, ?)`,
+    [userId, receiverId, message],
+    (err, result) => {
+      if (err) {
+        console.error(err);
+        return;
+      }
+
+      db.query(
+        `SELECT * from chats where id=?`,
+        [result.insertId],
+        (err, result) => {
+          if (err) {
+            console.error(err);
+            return;
+          }
+          const messageData = JSON.stringify({
+            type: "chat_message",
+            data: result,
+          });
+          toWs.send(messageData);
+        }
+      );
+    }
+  );
+};
+
+const getGroupChats = (userId, group_id) => {
+  const ws = client.get(userId);
+  if (!ws) return;
+
+  db.query(
+    `select * from group_chats where group_id=? order by sent_time`,
+    [group_id],
+    (err, result) => {
+      if (err) {
+        console.error(err);
+        return;
+      }
+      const messageData = JSON.stringify({
+        type: "group_chat_message",
+        data: result,
+      });
+      ws.send(messageData);
+    }
+  );
+};
+
+const sendGroupMessage = (userId, data) => {
+  const ws = client.get(userId);
+  if (!ws) return;
+
+  db.query(
+    `Insert into group_chats(group_id,sent_by,message) values(?,?,?)`,
+    [data.chatID, userId, data.message],
+    (insertErr, insertResult) => {
+      if (insertErr) {
+        console.error(insertErr);
+        return;
+      }
+      db.query(
+        `select * from group_chats where group_id=?`,
+        [data.chatID],
+        (groupChatsError, groupChatsResult) => {
+          if (groupChatsError) {
+            console.error(groupChatsError);
+            return;
+          }
+          db.query(
+            `select user_id from group_members
+          where group_id=?`,
+            [data.chatID],
+            (groupMembersError, groupMembersResult) => {
+              if (groupMembersError) {
+                console.error(groupMembersError);
+                return;
+              }
+              groupMembersResult.forEach((member) => {
+                let tempws = client.get(member.user_id);
+                if (!tempws) {
+                  console.log("user not active", member.user_id);
+                } else {
+                  let messageData = JSON.stringify({
+                    type: "group_chat_message",
+                    data: groupChatsResult,
+                  });
+                  tempws.send(messageData);
+                }
+              });
+            }
+          );
+        }
+      );
+    }
+  );
+};
+
+wss.on("connection", (ws, req) => {
+  const token = req.url.split("=")[1];
+  const userId = getUserIdFromToken(token);
+  client.set(userId, ws);
+  if (userId) {
+    ws.on("message", (message) => {
+      const parsedMessage = JSON.parse(message);
+      console.log("parsedMessage", parsedMessage);
+      const { type, data } = parsedMessage;
+      let result = { key: "help" };
+      switch (type) {
+        case "get_chats_and_group":
+          getChats(userId);
+          getGroups(userId);
+          break;
+        case "get_chat":
+          getChat(userId, data);
+          break;
+        case "get_group_chat":
+          getGroupChats(userId, data);
+          break;
+        case "send_group_message":
+          sendGroupMessage(userId, data);
+          break;
+        case "send_message":
+          sendMessage(userId, data.chatID, data.message);
+          getChat(userId, data.chatID);
+          // sendMessageToReceiver(
+          //   userId,
+          //   data.chatID,
+          //   data.message,
+          //   client.get(data.chatID)
+          // );
+          break;
+        default:
+          break;
+      }
     });
-  });
-}
+
+    ws.on("close", () => {
+      client.delete(userId);
+    });
+  }
+});
 
 server.listen(5000, () => console.log(`🚀 Server running on port ${port}`));

@@ -17,4 +17,17 @@ function authMiddleware(req, res, next) {
   }
 }
 
-module.exports = authMiddleware;
+function getUserIdFromToken(token) {
+  if (!token) return null;
+
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    return decoded.id;
+  } catch (err) {
+    return null;
+  }
+}
+module.exports = {
+  authMiddleware,
+  getUserIdFromToken,
+};
