@@ -32,7 +32,7 @@ FROM connections c
 JOIN users u 
 ON ((c.user_1 =? AND u.id = c.user_2) 
 OR (c.user_2 = ? AND u.id = c.user_1))
-WHERE c.user_1 = ? OR c.user_2 = ?;`,
+WHERE (c.user_1 = ? OR c.user_2 = ?) and c.status="FRIEND";`,
     [userId, userId, userId, userId],
     (err, result) => {
       if (err) {
@@ -52,19 +52,77 @@ const getGroups = (userId) => {
   const ws = client.get(userId);
   if (!ws) return;
   db.query(
-    `SELECT gl.id AS group_id, gl.group_name,gl.last_message
-FROM group_members gm
-JOIN groups_list gl ON gm.group_id = gl.id
-WHERE gm.user_id = ?;`,
+    `SELECT 
+    gl.id AS group_id,
+    gl.group_name,
+    gl.last_message,
+    u.id,
+    u.full_name,
+    u.username,
+    u.email,
+    gm.rights
+FROM 
+    group_members AS gm
+JOIN 
+    groups_list AS gl ON gm.group_id = gl.id
+JOIN 
+    users AS u ON gm.user_id = u.id
+WHERE 
+    gm.group_id IN (
+        SELECT group_id 
+        FROM group_members 
+        WHERE user_id = ?
+    )
+ORDER BY 
+    gl.id, u.full_name;`,
     [userId],
     (err, result) => {
       if (err) {
         console.error(err);
         return;
       }
+
+      const groups = result.reduce((acc, row) => {
+        const {
+          group_id,
+          group_name,
+          id,
+          full_name,
+          last_message,
+          username,
+          email,
+          rights,
+        } = row;
+
+        // Find the group in the accumulator
+        let group = acc.find((group) => group.group_id === group_id);
+
+        // If group doesn't exist, create a new one and add to the array
+        if (!group) {
+          group = {
+            group_id,
+            group_name,
+            last_message,
+            users: [],
+          };
+          acc.push(group);
+        }
+
+        // Add the user to the group
+        group.users.push({
+          id,
+          full_name,
+          username,
+          email,
+          rights,
+        });
+
+        return acc;
+      }, []);
+
       const message = JSON.stringify({
         type: "get_groups",
-        data: result,
+        data: groups,
       });
       ws.send(message);
     }
@@ -97,7 +155,20 @@ order by sent_time;`,
 
 const sendMessage = (userId, receiverId, message) => {
   const toWs = client.get(receiverId);
-  if (!toWs) return;
+  if (!toWs) {
+    db.query(
+      `INSERT INTO chats (sent_by, sent_to, message,seen) VALUES (?, ?, ?,false)`,
+      [userId, receiverId, message],
+      (err, res) => {
+        if (err) {
+          console.log(err);
+          return;
+        }
+        return;
+      }
+    );
+    return;
+  }
   db.query(
     `INSERT INTO chats (sent_by, sent_to, message) VALUES (?, ?, ?)`,
     [userId, receiverId, message],
@@ -196,6 +267,126 @@ const sendGroupMessage = (userId, data) => {
   );
 };
 
+const searchUser = (userId, query) => {
+  console.log("query", query);
+  const ws = client.get(userId);
+  if (!ws) return;
+  db.query(
+    `SELECT 
+  u.id,
+  u.full_name,
+  u.username,
+  u.email,
+  c.status
+FROM users u
+LEFT JOIN connections c 
+  ON (
+    (c.user_1 = ? AND c.user_2 = u.id) OR
+    (c.user_2 = ? AND c.user_1 = u.id)
+  )
+WHERE u.id != ? AND c.status IS null
+  AND (
+    u.full_name LIKE ? OR
+    u.username LIKE ?
+  )
+  limit 7;`,
+    [userId, userId, userId, `%${query}%`, `%${query}%`],
+    (err, result) => {
+      if (err) {
+        console.error(err);
+        return;
+      }
+      const message = JSON.stringify({
+        type: "search_user",
+        data: result,
+      });
+      ws.send(message);
+    }
+  );
+};
+
+const getFriendRequests = (userId) => {
+  const ws = client.get(userId);
+  if (!ws) return;
+  db.query(
+    `select u.id, u.full_name ,u.username, u.email from users u
+join connections c
+on u.id=c.user_2
+where status=c.user_2 and c.user_1=?`,
+    [userId],
+    (err, result) => {
+      if (err) {
+        console.error(err);
+        return;
+      }
+      const message = JSON.stringify({
+        type: "get_friend_requests",
+        data: result,
+      });
+      ws.send(message);
+    }
+  );
+};
+
+const acceptFriendRequest = (userId, data) => {
+  const ws = client.get(userId);
+  if (!ws) return;
+  db.query(
+    `update connections 
+    set status="FRIEND" 
+    where ((user_1=? AND user_2=?) OR (user_1=? AND user_2=?)) limit 1;`,
+    [userId, data.id, data.id, userId],
+    (err, result) => {
+      if (err) {
+        console.error(err);
+        return;
+      }
+      const message = JSON.stringify({
+        type: "accept_friend_request",
+        data: { id: data.id },
+      });
+      ws.send(message);
+      getChats(data.id);
+    }
+  );
+};
+
+const sendFriendRequest = (userId, data) => {
+  const ws = client.get(userId);
+  if (!ws) return;
+  db.query(
+    `insert into connections (user_1, user_2, status) values (?, ?,?)`,
+    [data.id, userId, userId],
+    (err, res) => {
+      if (err) {
+        console.error(err);
+        return;
+      }
+      const message = JSON.stringify({
+        type: "send_friend_request",
+        data: { id: data.id },
+      });
+      ws.send(message);
+      const ws2 = client.get(data.id);
+      if (!ws2) return;
+      db.query(
+        `select id,full_name,username,email from users where id=?`,
+        [userId],
+        (getErr, getRes) => {
+          if (getErr) {
+            console.error(getErr);
+            return;
+          }
+          const message2 = JSON.stringify({
+            type: "get_friend_requests",
+            data: getRes,
+          });
+          ws2.send(message2);
+        }
+      );
+    }
+  );
+};
 wss.on("connection", (ws, req) => {
   const token = req.url.split("=")[1];
   const userId = getUserIdFromToken(token);
@@ -205,7 +396,6 @@ wss.on("connection", (ws, req) => {
       const parsedMessage = JSON.parse(message);
       console.log("parsedMessage", parsedMessage);
       const { type, data } = parsedMessage;
-      let result = { key: "help" };
       switch (type) {
         case "get_chats_and_group":
           getChats(userId);
@@ -219,16 +409,24 @@ wss.on("connection", (ws, req) => {
           break;
         case "send_group_message":
           sendGroupMessage(userId, data);
+          getGroupChats(userId, data);
           break;
         case "send_message":
           sendMessage(userId, data.chatID, data.message);
           getChat(userId, data.chatID);
-          // sendMessageToReceiver(
-          //   userId,
-          //   data.chatID,
-          //   data.message,
-          //   client.get(data.chatID)
-          // );
+          break;
+        case "search_user":
+          searchUser(userId, data);
+          break;
+        case "get_friend_requests":
+          getFriendRequests(userId);
+          break;
+        case "accept_friend_request":
+          acceptFriendRequest(userId, data);
+          getChats(userId);
+          break;
+        case "send_friend_request":
+          sendFriendRequest(userId, data);
           break;
         default:
           break;
