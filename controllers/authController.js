@@ -1,8 +1,8 @@
-const db = require("../config/db");
-const bcrypt = require("bcryptjs");
-const jwt = require("jsonwebtoken");
+import bcrypt from "bcryptjs";
+import jwt from "jsonwebtoken";
+import db from "../config/db.js";
 
-exports.register = (req, res) => {
+const register = (req, res) => {
   const { full_name, username, email, password } = req.body;
   const hashedPassword = bcrypt.hashSync(password, 10);
   const query =
@@ -25,7 +25,7 @@ exports.register = (req, res) => {
   );
 };
 
-exports.login = (req, res) => {
+const login = (req, res) => {
   const { email, password } = req.body;
 
   const query = "SELECT * FROM users WHERE email = ?";
@@ -57,3 +57,4 @@ exports.login = (req, res) => {
     });
   });
 };
+export default { login, register };

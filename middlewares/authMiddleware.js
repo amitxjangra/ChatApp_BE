@@ -1,6 +1,6 @@
-const jwt = require("jsonwebtoken");
+import jwt from "jsonwebtoken";
 
-function authMiddleware(req, res, next) {
+const authMiddleware = (req, res, next) => {
   const token = req.header("Authorization");
 
   if (!token) return res.status(401).json({ message: "No token provided" });
@@ -15,9 +15,9 @@ function authMiddleware(req, res, next) {
   } catch (err) {
     res.status(401).json({ message: "Invalid token" });
   }
-}
+};
 
-function getUserIdFromToken(token) {
+const getUserIdFromToken = (token) => {
   if (!token) return null;
 
   try {
@@ -26,8 +26,5 @@ function getUserIdFromToken(token) {
   } catch (err) {
     return null;
   }
-}
-module.exports = {
-  authMiddleware,
-  getUserIdFromToken,
 };
+export { authMiddleware, getUserIdFromToken };
