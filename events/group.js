@@ -162,6 +162,24 @@ const createGroup = (userId, data) => {
         return;
       }
       console.log("res", res);
+      if (data.group_members.length) {
+        const values = data.group_members.map((userId) => [
+          res.insertId,
+          userId,
+          "MEMBER",
+        ]);
+        db.query(
+          `insert into group_members (group_id,user_id,rights) values ?`,
+          [values],
+          (err, res) => {
+            if (err) {
+              console.error("Error inserting group members:", err);
+            } else {
+              console.log("Inserted group members:", res.affectedRows);
+            }
+          }
+        );
+      }
       db.query(
         `insert into group_members (group_id,user_id,rights) values(? ,? ,"ADMIN")`,
         [res.insertId, userId],
